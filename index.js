@@ -4,15 +4,13 @@ const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 const FormData = require("form-data");
 
-// 🔑 التوكن من .env
 const token = process.env.BOT_TOKEN;
 
 if (!token) {
-    console.error("BOT_TOKEN is missing in .env");
+    console.error("BOT_TOKEN missing in .env");
     process.exit(1);
 }
 
-// 🤖 تشغيل البوت
 const bot = new TelegramBot(token, {
     polling: {
         interval: 300,
@@ -20,63 +18,78 @@ const bot = new TelegramBot(token, {
     },
 });
 
+// 📌 /start
+bot.onText(/\/start/, (msg) => {
+    bot.sendMessage(
+        msg.chat.id,
+        "Send me an anime screenshot and I’ll try to identify it 🎬"
+    );
+});
+
 // 🖼️ عند استقبال صورة
 bot.on("photo", async (msg) => {
     const chatId = msg.chat.id;
 
     try {
-        bot.sendMessage(chatId, "Processing image... chill 😎");
+        bot.sendMessage(chatId, "Searching anime… give me a sec 🧠");
 
-        // أخذ أعلى جودة صورة
+        // أعلى جودة صورة
         const fileId = msg.photo[msg.photo.length - 1].file_id;
 
-        // جلب ملف الصورة من Telegram
         const file = await bot.getFile(fileId);
         const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
 
-        const imageResponse = await axios.get(fileUrl, {
+        const imageBuffer = await axios.get(fileUrl, {
             responseType: "arraybuffer",
         });
 
-        // تجهيزها لإرسالها لـ trace.moe
+        // إرسال الصورة لـ trace.moe
         const form = new FormData();
-        form.append("image", Buffer.from(imageResponse.data), "image.jpg");
+        form.append("image", Buffer.from(imageBuffer.data), "image.jpg");
 
-        // طلب البحث من trace.moe
-        const result = await axios.post("https://api.trace.moe/search", form, {
-            headers: form.getHeaders(),
-        });
+        const result = await axios.post(
+            "https://api.trace.moe/search",
+            form,
+            {
+                headers: form.getHeaders(),
+            }
+        );
 
         const data = result.data?.result?.[0];
 
         if (!data) {
-            return bot.sendMessage(chatId, "No anime found. skill issue maybe.");
+            return bot.sendMessage(chatId, "No match found. try another image.");
         }
 
+        // 🎯 استخراج اسم أنمي صحيح
+        const animeTitle =
+            data.anilist?.title?.english ||
+            data.anilist?.title?.romaji ||
+            data.anilist?.title?.native ||
+            "Unknown Anime";
+
+        // 📄 رسالة النتيجة
         const reply = `
-🎬 Title: ${data.filename}
+🎬 Title: ${animeTitle}
 📺 Episode: ${data.episode ?? "unknown"}
 ⏱ Time: ${Math.floor(data.from)}s - ${Math.floor(data.to)}s
 🎯 Similarity: ${(data.similarity * 100).toFixed(2)}%
 `;
 
-        bot.sendMessage(chatId, reply);
+        await bot.sendMessage(chatId, reply);
+
+        // 🎥 إرسال الفيديو إذا موجود
+        if (data.video) {
+            await bot.sendVideo(chatId, data.video, {
+                caption: animeTitle,
+            });
+        }
     } catch (err) {
         console.error(err?.response?.data || err.message);
 
         bot.sendMessage(
             chatId,
-            "Something broke. either API cried or you did."
+            "Something went wrong. API probably tripped."
         );
     }
 });
-
-// 💬 لو حد كتب /start
-bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(
-        msg.chat.id,
-        "Send me an anime screenshot and I'll try to find it."
-    );
-});
-
-console.log("TOKEN:", process.env.BOT_TOKEN);
