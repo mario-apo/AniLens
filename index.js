@@ -18,11 +18,54 @@ const bot = new TelegramBot(token, {
     },
 });
 
-// 📌 /start
+// 🧠 تحويل الثواني إلى h/m/s
+function formatTime(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+
+    let result = "";
+
+    if (h > 0) result += `${h}h `;
+    if (m > 0 || h > 0) result += `${m}m `;
+    result += `${s}s`;
+
+    return result.trim();
+}
+
+// 🎬 جلب اسم الأنمي من AniList
+async function getAnimeTitle(id) {
+    try {
+        const query = `
+      query ($id: Int) {
+        Media(id: $id, type: ANIME) {
+          title {
+            romaji
+            english
+            native
+          }
+        }
+      }
+    `;
+
+        const res = await axios.post("https://graphql.anilist.co", {
+            query,
+            variables: { id },
+        });
+
+        const t = res.data?.data?.Media?.title;
+
+        return t?.english || t?.romaji || t?.native || "Unknown Anime";
+    } catch {
+        return "Unknown Anime";
+    }
+}
+
+// /start
 bot.onText(/\/start/, (msg) => {
     bot.sendMessage(
         msg.chat.id,
-        "Send me an anime screenshot and I’ll try to identify it 🎬"
+        "Send me an anime screenshot and I’ll identify it 🎬"
     );
 });
 
@@ -31,21 +74,19 @@ bot.on("photo", async (msg) => {
     const chatId = msg.chat.id;
 
     try {
-        bot.sendMessage(chatId, "Searching anime… give me a sec 🧠");
+        bot.sendMessage(chatId, "Searching anime… 🧠");
 
-        // أعلى جودة صورة
         const fileId = msg.photo[msg.photo.length - 1].file_id;
 
         const file = await bot.getFile(fileId);
         const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
 
-        const imageBuffer = await axios.get(fileUrl, {
+        const img = await axios.get(fileUrl, {
             responseType: "arraybuffer",
         });
 
-        // إرسال الصورة لـ trace.moe
         const form = new FormData();
-        form.append("image", Buffer.from(imageBuffer.data), "image.jpg");
+        form.append("image", Buffer.from(img.data), "image.jpg");
 
         const result = await axios.post(
             "https://api.trace.moe/search",
@@ -58,21 +99,20 @@ bot.on("photo", async (msg) => {
         const data = result.data?.result?.[0];
 
         if (!data) {
-            return bot.sendMessage(chatId, "No match found. try another image.");
+            return bot.sendMessage(chatId, "No match found.");
         }
 
-        // 🎯 استخراج اسم أنمي صحيح
-        const animeTitle =
-            data.anilist?.title?.english ||
-            data.anilist?.title?.romaji ||
-            data.anilist?.title?.native ||
-            "Unknown Anime";
+        // 🎯 اسم الأنمي الحقيقي
+        const animeTitle = await getAnimeTitle(data.anilist);
 
-        // 📄 رسالة النتيجة
+        // ⏱️ تنسيق الوقت
+        const timeText = `${formatTime(data.from)} → ${formatTime(data.to)}`;
+
+        // 📩 الرد
         const reply = `
 🎬 Title: ${animeTitle}
 📺 Episode: ${data.episode ?? "unknown"}
-⏱ Time: ${Math.floor(data.from)}s - ${Math.floor(data.to)}s
+⏱ Time: ${timeText}
 🎯 Similarity: ${(data.similarity * 100).toFixed(2)}%
 `;
 
@@ -87,9 +127,6 @@ bot.on("photo", async (msg) => {
     } catch (err) {
         console.error(err?.response?.data || err.message);
 
-        bot.sendMessage(
-            chatId,
-            "Something went wrong. API probably tripped."
-        );
+        bot.sendMessage(chatId, "Something broke. API probably misbehaving.");
     }
 });
