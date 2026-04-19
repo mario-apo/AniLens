@@ -3,6 +3,7 @@ require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 const FormData = require("form-data");
+const express = require("express");
 
 const token = process.env.BOT_TOKEN;
 
@@ -11,7 +12,10 @@ if (!token) {
     process.exit(1);
 }
 
-const bot = new TelegramBot(token, { polling: true });
+const bot = new TelegramBot(token);
+const app = express();
+
+app.use(express.json());
 
 /* =========================
    🧠 Cache + Pending
@@ -74,7 +78,6 @@ async function getAnimeTitle(id) {
 ========================= */
 async function analyzeImage(chatId, imageUrl) {
     try {
-        // Cache
         if (cache.has(imageUrl)) {
             return bot.sendMessage(chatId, cache.get(imageUrl));
         }
@@ -126,7 +129,6 @@ async function analyzeImage(chatId, imageUrl) {
 ========================= */
 function sendAnalyzeButton(chatId, imageUrl) {
     const id = generateId();
-
     pending.set(id, imageUrl);
 
     bot.sendMessage(chatId, "Ready to analyze?", {
@@ -147,7 +149,7 @@ function sendAnalyzeButton(chatId, imageUrl) {
    🌐 Extractors
 ========================= */
 
-// Twitter via fxtwitter
+// Twitter (fxtwitter)
 async function extractTwitterImage(url) {
     try {
         const id = url.split("/status/")[1];
@@ -180,7 +182,7 @@ async function extractRedditImage(url) {
     }
 }
 
-// Facebook (basic)
+// Facebook
 async function extractFacebookImage(url) {
     try {
         const res = await axios.get(url, {
@@ -198,7 +200,10 @@ async function extractFacebookImage(url) {
    🤖 Handlers
 ========================= */
 
-// 📸 صور مباشرة
+bot.onText(/\/start/, (msg) => {
+    bot.sendMessage(msg.chat.id, "Send image or link 🎬");
+});
+
 bot.on("photo", async (msg) => {
     const fileId = msg.photo[msg.photo.length - 1].file_id;
     const file = await bot.getFile(fileId);
@@ -207,11 +212,9 @@ bot.on("photo", async (msg) => {
     sendAnalyzeButton(msg.chat.id, url);
 });
 
-// 📩 Forward messages
 bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
 
-    // Forwarded photo
     if (msg.forward_from && msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
         const file = await bot.getFile(fileId);
@@ -220,7 +223,6 @@ bot.on("message", async (msg) => {
         return sendAnalyzeButton(chatId, url);
     }
 
-    // Links
     const text = msg.text;
     if (!text) return;
 
@@ -239,7 +241,6 @@ bot.on("message", async (msg) => {
     }
 });
 
-// 🔘 Button click
 bot.on("callback_query", async (query) => {
     const id = query.data;
     const chatId = query.message.chat.id;
@@ -256,4 +257,34 @@ bot.on("callback_query", async (query) => {
     await analyzeImage(chatId, imageUrl);
 
     pending.delete(id);
+});
+
+/* =========================
+   🌐 Webhook Server
+========================= */
+
+const PORT = process.env.PORT || 3000;
+const URL = process.env.RENDER_EXTERNAL_URL;
+
+const URL = process.env.RENDER_EXTERNAL_URL;
+
+if (!URL) {
+  console.error("RENDER_EXTERNAL_URL is missing");
+} else {
+  bot.setWebHook(`${URL}/bot${token}`)
+    .then(() => console.log("Webhook set successfully"))
+    .catch(console.error);
+}
+
+app.post(`/bot${token}`, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+});
+
+app.get("/", (req, res) => {
+    res.send("AniLens bot running...");
+});
+
+app.listen(PORT, () => {
+    console.log("Server running on port", PORT);
 });
