@@ -5,17 +5,50 @@ const axios = require("axios");
 const FormData = require("form-data");
 const express = require("express");
 
+/* =========================
+   🔧 ENV Variables
+========================= */
 const token = process.env.BOT_TOKEN;
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+const PORT = process.env.PORT || 3000;
 
 if (!token) {
-    console.error("BOT_TOKEN missing");
+    console.error("❌ BOT_TOKEN missing");
     process.exit(1);
 }
 
-const bot = new TelegramBot(token);
-const app = express();
+/* =========================
+   🤖 Bot Setup (Webhook)
+========================= */
+const bot = new TelegramBot(token, { webHook: true });
 
+const app = express();
 app.use(express.json());
+
+// Webhook route
+app.post(`/bot${token}`, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+});
+
+// Health check
+app.get("/", (req, res) => res.send("✅ AniLens Bot is running."));
+
+app.listen(PORT, async () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+
+    if (RENDER_URL) {
+        const webhookURL = `${RENDER_URL}/bot${token}`;
+        try {
+            await bot.setWebHook(webhookURL);
+            console.log(`✅ Webhook set: ${webhookURL}`);
+        } catch (err) {
+            console.error("❌ Failed to set webhook:", err.message);
+        }
+    } else {
+        console.warn("⚠️ RENDER_EXTERNAL_URL not set — webhook not configured.");
+    }
+});
 
 /* =========================
    🧠 Cache + Pending
@@ -53,16 +86,16 @@ async function getAnimeTitle(id) {
     try {
         const res = await axios.post("https://graphql.anilist.co", {
             query: `
-        query ($id: Int) {
-          Media(id: $id, type: ANIME) {
-            title {
-              romaji
-              english
-              native
-            }
-          }
-        }
-      `,
+                query ($id: Int) {
+                    Media(id: $id, type: ANIME) {
+                        title {
+                            romaji
+                            english
+                            native
+                        }
+                    }
+                }
+            `,
             variables: { id },
         });
 
@@ -78,83 +111,70 @@ async function getAnimeTitle(id) {
 ========================= */
 async function analyzeImage(chatId, imageUrl) {
     try {
+        // Return from cache if available
         if (cache.has(imageUrl)) {
             return bot.sendMessage(chatId, cache.get(imageUrl));
         }
 
-        const img = await axios.get(imageUrl, {
-            responseType: "arraybuffer",
-        });
+        const img = await axios.get(imageUrl, { responseType: "arraybuffer" });
 
         const form = new FormData();
         form.append("image", Buffer.from(img.data), "image.jpg");
 
-        const result = await axios.post(
-            "https://api.trace.moe/search",
-            form,
-            { headers: form.getHeaders() }
-        );
+        const result = await axios.post("https://api.trace.moe/search", form, {
+            headers: form.getHeaders(),
+        });
 
         const data = result.data?.result?.[0];
 
         if (!data) {
-            return bot.sendMessage(chatId, "No match found.");
+            return bot.sendMessage(chatId, "❌ No match found.");
         }
 
         const title = await getAnimeTitle(data.anilist);
         const time = `${formatTime(data.from)} → ${formatTime(data.to)}`;
 
-        const text = `
-🎬 ${title}
-📺 Episode: ${data.episode ?? "unknown"}
-⏱ ${time}
-🎯 ${(data.similarity * 100).toFixed(2)}%
-`;
+        const text = `🎬 *${title}*\n📺 Episode: ${data.episode ?? "unknown"}\n⏱ ${time}\n🎯 ${(data.similarity * 100).toFixed(2)}%`;
 
         cache.set(imageUrl, text);
 
-        await bot.sendMessage(chatId, text);
+        await bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
 
         if (data.video) {
             await bot.sendVideo(chatId, data.video);
         }
     } catch (err) {
-        console.error(err.message);
-        bot.sendMessage(chatId, "Analysis failed.");
+        console.error("analyzeImage error:", err.message);
+        bot.sendMessage(chatId, "⚠️ Analysis failed. Please try again.");
     }
 }
 
 /* =========================
-   🔘 Analyze Button
+   🔘 Send Analyze Button
 ========================= */
 function sendAnalyzeButton(chatId, imageUrl) {
     const id = generateId();
     pending.set(id, imageUrl);
 
-    bot.sendMessage(chatId, "Ready to analyze?", {
+    bot.sendMessage(chatId, "🖼 Image received. Ready to analyze?", {
         reply_markup: {
             inline_keyboard: [
-                [
-                    {
-                        text: "🔍 Analyze",
-                        callback_data: id,
-                    },
-                ],
+                [{ text: "🔍 Analyze", callback_data: id }],
             ],
         },
     });
 }
 
 /* =========================
-   🌐 Extractors
+   🌐 Link Extractors
 ========================= */
 
-// Twitter (fxtwitter)
+// Twitter / X via fxtwitter
 async function extractTwitterImage(url) {
     try {
-        const id = url.split("/status/")[1];
-        const api = `https://api.fxtwitter.com/v1/status/${id}`;
-        const res = await axios.get(api);
+        const id = url.split("/status/")[1]?.split("?")[0];
+        if (!id) return null;
+        const res = await axios.get(`https://api.fxtwitter.com/v1/status/${id}`);
         return res.data?.tweet?.media?.all?.[0]?.url || null;
     } catch {
         return null;
@@ -164,13 +184,12 @@ async function extractTwitterImage(url) {
 // Reddit
 async function extractRedditImage(url) {
     try {
-        if (!url.endsWith("/")) url += "/";
-        const res = await axios.get(url + ".json", {
+        const cleanUrl = url.endsWith("/") ? url : url + "/";
+        const res = await axios.get(cleanUrl + ".json", {
             headers: { "User-Agent": "Mozilla/5.0" },
         });
 
         const post = res.data?.[0]?.data?.children?.[0]?.data;
-
         return (
             post?.preview?.images?.[0]?.source?.url ||
             post?.url_overridden_by_dest ||
@@ -182,7 +201,7 @@ async function extractRedditImage(url) {
     }
 }
 
-// Facebook
+// Facebook (OG meta tag)
 async function extractFacebookImage(url) {
     try {
         const res = await axios.get(url, {
@@ -197,32 +216,39 @@ async function extractFacebookImage(url) {
 }
 
 /* =========================
-   🤖 Handlers
+   🤖 Bot Handlers
 ========================= */
 
-bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, "Send image or link 🎬");
-});
-
+// 📸 Direct photo
 bot.on("photo", async (msg) => {
-    const fileId = msg.photo[msg.photo.length - 1].file_id;
-    const file = await bot.getFile(fileId);
-
-    const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-    sendAnalyzeButton(msg.chat.id, url);
+    try {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        const file = await bot.getFile(fileId);
+        const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+        sendAnalyzeButton(msg.chat.id, url);
+    } catch (err) {
+        console.error("photo handler error:", err.message);
+    }
 });
 
+// 📩 Messages (forwarded photos + links)
 bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
 
+    // Forwarded photo
     if (msg.forward_from && msg.photo) {
-        const fileId = msg.photo[msg.photo.length - 1].file_id;
-        const file = await bot.getFile(fileId);
-
-        const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-        return sendAnalyzeButton(chatId, url);
+        try {
+            const fileId = msg.photo[msg.photo.length - 1].file_id;
+            const file = await bot.getFile(fileId);
+            const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+            return sendAnalyzeButton(chatId, url);
+        } catch (err) {
+            console.error("forward handler error:", err.message);
+            return;
+        }
     }
 
+    // Text links
     const text = msg.text;
     if (!text) return;
 
@@ -241,6 +267,7 @@ bot.on("message", async (msg) => {
     }
 });
 
+// 🔘 Inline button callback
 bot.on("callback_query", async (query) => {
     const id = query.data;
     const chatId = query.message.chat.id;
@@ -248,43 +275,13 @@ bot.on("callback_query", async (query) => {
     const imageUrl = pending.get(id);
 
     if (!imageUrl) {
-        return bot.sendMessage(chatId, "Request expired.");
+        return bot.answerCallbackQuery(query.id, { text: "⚠️ Request expired." });
     }
 
-    bot.answerCallbackQuery(query.id);
-    bot.sendMessage(chatId, "Analyzing… 🧠");
+    await bot.answerCallbackQuery(query.id);
+    await bot.sendMessage(chatId, "🧠 Analyzing...");
 
     await analyzeImage(chatId, imageUrl);
 
     pending.delete(id);
-});
-
-/* =========================
-   🌐 Webhook Server
-========================= */
-
-const PORT = process.env.PORT || 3000;
-const URL = process.env.RENDER_EXTERNAL_URL;
-
-const URL = process.env.RENDER_EXTERNAL_URL;
-
-if (!URL) {
-  console.error("RENDER_EXTERNAL_URL is missing");
-} else {
-  bot.setWebHook(`${URL}/bot${token}`)
-    .then(() => console.log("Webhook set successfully"))
-    .catch(console.error);
-}
-
-app.post(`/bot${token}`, (req, res) => {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
-});
-
-app.get("/", (req, res) => {
-    res.send("AniLens bot running...");
-});
-
-app.listen(PORT, () => {
-    console.log("Server running on port", PORT);
 });
