@@ -11,45 +11,54 @@ if (!token) {
     process.exit(1);
 }
 
-const bot = new TelegramBot(token, {
-    polling: true,
-});
+const bot = new TelegramBot(token, { polling: true });
 
 /* =========================
-   🧠 Cache بسيط
+   🧠 Cache + Pending
 ========================= */
 const cache = new Map();
+const pending = new Map();
 
 /* =========================
-   ⏱️ Time formatter
+   🔑 ID Generator
+========================= */
+function generateId() {
+    return Math.random().toString(36).substring(2, 10);
+}
+
+/* =========================
+   ⏱️ Format Time
 ========================= */
 function formatTime(seconds) {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = Math.floor(seconds % 60);
 
-    return `${h ? h + "h " : ""}${m ? m + "m " : ""}${s}s`;
+    let str = "";
+    if (h > 0) str += `${h}h `;
+    if (m > 0 || h > 0) str += `${m}m `;
+    str += `${s}s`;
+
+    return str.trim();
 }
 
 /* =========================
-   🎬 AniList
+   🎬 AniList Title
 ========================= */
 async function getAnimeTitle(id) {
     try {
-        const query = `
-      query ($id: Int) {
-        Media(id: $id, type: ANIME) {
-          title {
-            romaji
-            english
-            native
+        const res = await axios.post("https://graphql.anilist.co", {
+            query: `
+        query ($id: Int) {
+          Media(id: $id, type: ANIME) {
+            title {
+              romaji
+              english
+              native
+            }
           }
         }
-      }
-    `;
-
-        const res = await axios.post("https://graphql.anilist.co", {
-            query,
+      `,
             variables: { id },
         });
 
@@ -61,11 +70,11 @@ async function getAnimeTitle(id) {
 }
 
 /* =========================
-   🎯 تحليل الصورة
+   🎯 Analyze Image
 ========================= */
 async function analyzeImage(chatId, imageUrl) {
     try {
-        // ⚡ Cache
+        // Cache
         if (cache.has(imageUrl)) {
             return bot.sendMessage(chatId, cache.get(imageUrl));
         }
@@ -107,15 +116,38 @@ async function analyzeImage(chatId, imageUrl) {
             await bot.sendVideo(chatId, data.video);
         }
     } catch (err) {
+        console.error(err.message);
         bot.sendMessage(chatId, "Analysis failed.");
     }
 }
 
 /* =========================
-   🌐 استخراج روابط
+   🔘 Analyze Button
+========================= */
+function sendAnalyzeButton(chatId, imageUrl) {
+    const id = generateId();
+
+    pending.set(id, imageUrl);
+
+    bot.sendMessage(chatId, "Ready to analyze?", {
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    {
+                        text: "🔍 Analyze",
+                        callback_data: id,
+                    },
+                ],
+            ],
+        },
+    });
+}
+
+/* =========================
+   🌐 Extractors
 ========================= */
 
-// Twitter (via fxtwitter)
+// Twitter via fxtwitter
 async function extractTwitterImage(url) {
     try {
         const id = url.split("/status/")[1];
@@ -148,7 +180,7 @@ async function extractRedditImage(url) {
     }
 }
 
-// Facebook (best effort)
+// Facebook (basic)
 async function extractFacebookImage(url) {
     try {
         const res = await axios.get(url, {
@@ -163,42 +195,23 @@ async function extractFacebookImage(url) {
 }
 
 /* =========================
-   🔘 زر Analyze
-========================= */
-function sendAnalyzeButton(chatId, imageUrl) {
-    bot.sendMessage(chatId, "Ready to analyze?", {
-        reply_markup: {
-            inline_keyboard: [
-                [
-                    {
-                        text: "🔍 Analyze",
-                        callback_data: imageUrl,
-                    },
-                ],
-            ],
-        },
-    });
-}
-
-/* =========================
    🤖 Handlers
 ========================= */
 
-// صور
+// 📸 صور مباشرة
 bot.on("photo", async (msg) => {
     const fileId = msg.photo[msg.photo.length - 1].file_id;
     const file = await bot.getFile(fileId);
 
     const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-
     sendAnalyzeButton(msg.chat.id, url);
 });
 
-// Forwarded messages
+// 📩 Forward messages
 bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
 
-    // 📩 forward فيه صورة
+    // Forwarded photo
     if (msg.forward_from && msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
         const file = await bot.getFile(fileId);
@@ -207,7 +220,7 @@ bot.on("message", async (msg) => {
         return sendAnalyzeButton(chatId, url);
     }
 
-    // 🔗 روابط
+    // Links
     const text = msg.text;
     if (!text) return;
 
@@ -226,13 +239,21 @@ bot.on("message", async (msg) => {
     }
 });
 
-// 🔘 عند الضغط على Analyze
+// 🔘 Button click
 bot.on("callback_query", async (query) => {
-    const imageUrl = query.data;
+    const id = query.data;
     const chatId = query.message.chat.id;
+
+    const imageUrl = pending.get(id);
+
+    if (!imageUrl) {
+        return bot.sendMessage(chatId, "Request expired.");
+    }
 
     bot.answerCallbackQuery(query.id);
     bot.sendMessage(chatId, "Analyzing… 🧠");
 
     await analyzeImage(chatId, imageUrl);
+
+    pending.delete(id);
 });
